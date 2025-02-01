@@ -1,1 +1,1 @@
-import src
+import src # noqa: F401
