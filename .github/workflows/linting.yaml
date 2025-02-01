@@ -1,0 +1,44 @@
+name: Linting Jobs
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up actionlint
+        shell: bash
+        run: |
+          bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.6.17
+      - name: Validate actionlint binary
+        run: |
+          EXPECTED_SHA="d7871032a99d739d9a8bfa78980d8cd0cbfebfcb9e49e01b62bdbe8fc61ac49f"
+          SHA="$(sha256sum ./actionlint | cut -d ' ' -f 1)"
+          if [ "$EXPECTED_SHA" != "$SHA" ]; then
+            echo "SHA mismatch: expected $EXPECTED_SHA but got $SHA"
+            exit 1
+          fi
+      - name: Run actionlint
+        shell: bash
+        run: ./actionlint
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          pyproject-file: pyproject.toml
+          version: "0.5.24"
+          checksum: "a0eb614f7fc38a6e14ef1c4819f1f187591db8e0d3c4218dae38b1bd663a00e2"
+      - name: Run ruff check
+        run: |
+          uv run ruff check .
