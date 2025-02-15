@@ -1,6 +1,7 @@
 from random import randrange
 from typing import List, Union
 
+
 def n_d(*dims: int, low: int = 0, high: int = 10) -> Union[int, List]:
     if not dims:
         return randrange(low, high, 1)
