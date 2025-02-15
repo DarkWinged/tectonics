@@ -13,15 +13,11 @@ T = TypeVar("T")
 
 class ShaderManager:
     """
-    A static class for managing OpenGL compute shaders and running them with registered controller functions.
+    Manages OpenGL compute shaders and provides utility methods for their compilation and execution.
 
     Attributes:
-        __shaders__ (dict): A dictionary of registered shader programs.
-        __ogl_active__ (bool): A flag indicating whether an OpenGL context is active.
-
-    Notes:
-        New compute shaders can be registered by decorating a function with the shader_context decorator.
-        Registered functions can be accessed as class methods and automatically run the associated shader program.
+        __shaders__ (dict): Stores compiled shader programs by name.
+        __ogl_active__ (bool): Indicates whether an OpenGL context is currently active.
     """
 
     __shaders__: dict = {}
@@ -34,16 +30,12 @@ class ShaderManager:
     @classmethod
     def __activate_ogl__(cls) -> None:
         """
-        Initializes an OpenGL context using GLFW. Sets ogl activivation status to True via the __ogl_active__ class attribute.
+        Initializes an OpenGL context using GLFW if one is not already active.
 
         Raises:
-            RuntimeError: If the initialization of the OpenGL context fails.
-
-        Notes:
-            The method is called by the class constructor and shader_context decorator to ensure an OpenGL context is active.
+            RuntimeError: If GLFW initialization or window creation fails.
         """
         print("Initializing OpenGL context...")
-
         if not glfw.init():
             raise RuntimeError("Failed to initialize GLFW")
 
@@ -54,7 +46,6 @@ class ShaderManager:
             raise RuntimeError("Failed to create an OpenGL context")
 
         glfw.make_context_current(window)
-
         print("OpenGL Context Initialized!")
         print("OpenGL Version:", gl.glGetString(gl.GL_VERSION).decode())
         cls.__ogl_active__ = True
@@ -62,24 +53,19 @@ class ShaderManager:
     @classmethod
     def __compile_compute_shader__(cls, shader_source: str, shader_name: str) -> None:
         """
-        Compiles a compute shader and links it to a program.
+        Compiles a compute shader from source and registers it under a given name.
 
         Args:
-            shader_source (str): The source code of the compute shader.
-            shader_name (str): The name of the shader to register.
+            shader_source (str): Source code for the compute shader.
+            shader_name (str): Name used to register the compiled shader program.
 
         Raises:
-            RuntimeError: If the shader compilation or linking
-
-        Notes:
-            The compiled shader program is registered to the class in the __shaders__ dictionary.
-            Utilized by the shader_context decorator to compile and register shaders.
+            RuntimeError: If shader compilation or linking fails.
         """
         shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER)
         gl.glShaderSource(shader, shader_source)
         gl.glCompileShader(shader)
 
-        # Check for errors
         if gl.glGetShaderiv(shader, gl.GL_COMPILE_STATUS) != gl.GL_TRUE:
             error = gl.glGetShaderInfoLog(shader).decode()
             raise RuntimeError(f"Compute shader compilation failed: {error}")
@@ -88,25 +74,25 @@ class ShaderManager:
         gl.glAttachShader(program, shader)
         gl.glLinkProgram(program)
 
-        # Check linking errors
         if gl.glGetProgramiv(program, gl.GL_LINK_STATUS) != gl.GL_TRUE:
             error = gl.glGetProgramInfoLog(program).decode()
             raise RuntimeError(f"Compute shader linking failed: {error}")
 
         cls.__shaders__[shader_name] = program
 
-    # helper decorator for managing shader wrappers functions
     @classmethod
     def shader_context(cls, shader_name: str, shader_path: str) -> Callable[P, T]:
         """
-        Decorator for registering a compute shader and a function to run it to the ShaderManager class.
+        Decorator that compiles a compute shader if necessary and associates it with a function.
+
+        The decorated function will automatically use the specified shader when called.
 
         Args:
-            shader_name (str): The name of the shader to register.
-            shader_path (str): The path to the shader source file.
+            shader_name (str): Name used to register or retrieve the compiled shader program.
+            shader_path (str): File path to the compute shader source code.
 
         Returns:
-            callable: The wrapper function.
+            Callable[P, T]: A decorator that wraps the target function.
         """
         if not cls.__ogl_active__:
             cls.__activate_ogl__()
@@ -117,17 +103,13 @@ class ShaderManager:
 
         def wrapper(func: Callable[P, T]) -> Callable[P, T]:
             """
-            Wrapper function to register the shader and function to the class.
+            Wraps a function so that it uses the specified compute shader when invoked.
 
             Args:
-                func (Callable[P, T]): A shader processing function, which accepts the shader program as a keyword argument.
+                func (Callable[P, T]): A function that accepts 'shader' as a keyword argument.
 
             Returns:
-                Callable[P, T]: The Decorated function.
-
-            Notes:
-                Utilizes the shader variable from the outer scope to pass the callable function as a keyword argument.
-                Wraped functions are required to accept the shader keyword argument in order to receive the shader program.
+                Callable[P, T]: The wrapped classmethod.
             """
 
             @classmethod
@@ -144,17 +126,14 @@ class ShaderManager:
     @classmethod
     def cubic_spline_2d(cls, grid: np.ndarray, samples: int) -> np.ndarray:
         """
-        Runs a 2D cubic spline interpolation using the compute shader row-wise and then column-wise.
+        Performs 2D cubic spline interpolation on a grid, processing rows and then columns.
 
         Args:
-            grid (np.ndarray): The input grid to interpolate.
-            samples (int): The number of samples to interpolate between each data point.
+            grid (np.ndarray): 2D array representing the input grid.
+            samples (int): Number of interpolated samples between adjacent data points.
 
         Returns:
-            np.ndarray: The interpolated grid.
-
-        Notes:
-            Utilizes the registered cubic_spline function to interpolate the grid.
+            np.ndarray: A 2D array with the interpolated result.
         """
         grid_height, grid_width = grid.shape
         output_width = grid_width * samples + (grid_width - samples)
@@ -178,18 +157,18 @@ class ShaderManager:
         cls, grid: np.ndarray, samples: int, chunk_size: int = 256
     ) -> np.ndarray:
         """
-        Runs a 2D cubic spline interpolation using the compute shader row-wise and then column-wise in chunks.
+        Performs 2D cubic spline interpolation on a grid in smaller chunks to reduce memory usage.
+
+        The grid is divided row-wise and column-wise into subregions, each of which is interpolated
+        independently via the 'cubic_spline_2d' method.
 
         Args:
-            grid (np.ndarray): The input grid to interpolate.
-            samples (int): The number of samples to interpolate between each data point.
-            chunk_size (int, optional): The size of the chunks to interpolate. Defaults to 256.
+            grid (np.ndarray): 2D array representing the input grid.
+            samples (int): Number of interpolated samples between adjacent data points.
+            chunk_size (int, optional): Size of each processing chunk. Defaults to 256.
 
         Returns:
-            np.ndarray: The interpolated grid.
-
-        Notes:
-            Utilizes the cubic_spline_2d method to interpolate chunks of the grid.
+            np.ndarray: A 2D array containing the interpolated result.
         """
         grid_height, grid_width = grid.shape
         output_width = grid_width * samples + (grid_width - samples)
@@ -217,10 +196,10 @@ class ShaderManager:
                 cropped_chunk = interpolated_chunk[
                     : y_out_end - y_out_start, : x_out_end - x_out_start
                 ]
-
                 final_output[y_out_start:y_out_end, x_out_start:x_out_end] = (
                     cropped_chunk
                 )
+
         return final_output
 
 
@@ -231,15 +210,15 @@ def write_grid_to_texture(
     interpolated_grid: np.ndarray, /, shader: str, output_filename="image.png"
 ):
     """
-    Writes an interpolated grid to a texture using an OpenGL compute shader and saves it as a PNG image.
+    Writes a 2D interpolated grid to a texture using an OpenGL compute shader, then saves it as a PNG image.
+
     Args:
-        interpolated_grid (np.ndarray): The interpolated grid data as a 2D NumPy array.
-        shader (str): The shader program to use for writing the grid to the texture.
-        output_filename (str, optional): The filename for the output PNG image. Defaults to "output.png".
+        interpolated_grid (np.ndarray): The 2D grid data to be saved.
+        shader (str): The compute shader program used to write data to the texture.
+        output_filename (str, optional): Name of the output PNG file. Defaults to "image.png".
+
     Raises:
-        ValueError: If the interpolated grid is not a 2D NumPy array.
-    Notes:
-        Registered as a class method to the ShaderManager class via the ShaderManager.shader_context decorator.
+        ValueError: If the input grid is not 2D.
     """
     interpolated_grid = np.array(interpolated_grid, dtype=np.float32)
     grid_height, grid_width = interpolated_grid.shape
@@ -249,12 +228,12 @@ def write_grid_to_texture(
     gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
     gl.glTexStorage2D(gl.GL_TEXTURE_2D, 1, gl.GL_RGBA32F, grid_width, grid_height)
 
-    # Bind texture to shader
+    # Bind texture to the shader
     gl.glBindImageTexture(
         1, texture, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F
     )
 
-    # Create OpenGL buffer for interpolated data
+    # Create OpenGL buffer for the grid data
     interpolated_data = interpolated_grid.flatten()
     buffer = gl.glGenBuffers(1)
     gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buffer)
@@ -269,11 +248,10 @@ def write_grid_to_texture(
     # Set shader uniforms
     grid_width_loc = gl.glGetUniformLocation(shader, "gridWidth")
     grid_height_loc = gl.glGetUniformLocation(shader, "gridHeight")
-
     gl.glUniform1i(grid_width_loc, grid_width)
     gl.glUniform1i(grid_height_loc, grid_height)
 
-    # Dispatch Compute Shader
+    # Dispatch the compute shader
     workgroup_size = 16
     gl.glDispatchCompute(
         (grid_width + workgroup_size - 1) // workgroup_size,
@@ -288,14 +266,14 @@ def write_grid_to_texture(
 
     # Convert to grayscale image and save as PNG
     output_image = (output_data[:, :, 0] * 255).astype(np.uint8)
-    realPath = os.path.realpath(output_filename)
-    Image.fromarray(output_image).save(realPath)
+    real_path = os.path.realpath(output_filename)
+    Image.fromarray(output_image).save(real_path)
 
     # Cleanup
     gl.glDeleteTextures(1, [texture])
     gl.glDeleteBuffers(1, [buffer])
 
-    print(f"Saved interpolated grid to {realPath}")
+    print(f"Saved interpolated grid to {real_path}")
 
 
 @ShaderManager.shader_context(
@@ -303,17 +281,18 @@ def write_grid_to_texture(
 )
 def cubic_spline(data: np.ndarray, samples: int, *, shader: str) -> np.ndarray:
     """
-    Calculates the cubic spline interpolation of a 1D array using an OpenGL compute shader.
+    Performs cubic spline interpolation on a 1D array using an OpenGL compute shader.
+
     Args:
-        data (np.ndarray): The input data to interpolate.
-        samples (int): The number of samples to interpolate between each data point.
-        shader (str): The shader program to use for cubic spline interpolation.
+        data (np.ndarray): 1D array of input values to be interpolated.
+        samples (int): Number of interpolated samples between adjacent data points.
+        shader (str): The compute shader program used for interpolation.
+
     Returns:
-        np.ndarray: The interpolated data.
+        np.ndarray: The interpolated 1D array.
+
     Raises:
-        ValueError: If the input data is not a 1D NumPy array.
-    Notes:
-        Registered as a class method to the ShaderManager class via the ShaderManager.shader_context decorator.
+        ValueError: If the input data is not a 1D array.
     """
     data_size = len(data)
     output_size = data_size * samples + (data_size - samples)
@@ -323,6 +302,7 @@ def cubic_spline(data: np.ndarray, samples: int, *, shader: str) -> np.ndarray:
 
     gl.glUseProgram(shader)
 
+    # Create buffers and bind them to shader storage
     input_ssbo = gl.glGenBuffers(1)
     gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, input_ssbo)
     gl.glBufferData(
@@ -343,17 +323,22 @@ def cubic_spline(data: np.ndarray, samples: int, *, shader: str) -> np.ndarray:
     )
     gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, output_ssbo)
 
+    # Set shader uniforms
     gl.glUniform1i(gl.glGetUniformLocation(shader, "samples"), samples)
     gl.glUniform1i(gl.glGetUniformLocation(shader, "dataSize"), data_size)
 
+    # Run compute shader
     gl.glDispatchCompute((output_size + 255) // 256, 1, 1)
     gl.glMemoryBarrier(gl.GL_SHADER_STORAGE_BARRIER_BIT)
 
+    # Retrieve results from output buffer
     gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, output_ssbo)
     output_data = np.frombuffer(
         gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, output_buffer.nbytes),
         dtype=np.float32,
     )
 
+    # Cleanup
     gl.glDeleteBuffers(2, [input_ssbo, output_ssbo])
+
     return output_data
