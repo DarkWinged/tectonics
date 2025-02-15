@@ -3,11 +3,20 @@ name = "tectonics"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "glfw>=2.8.0",
+    "ipykernel>=6.29.5",
+    "matplotlib>=3.10.0",
+    "numpy>=2.2.2",
+    "pyopengl>=3.1.9",
+    "pyopengl-accelerate>=3.1.9",
+    "scipy>=1.15.1",
+]
 
 [dependency-groups]
 dev = [
+    "jupyter>=1.1.1",
     "pytest>=8.3.4",
     "ruff>=0.9.4",
 ]
