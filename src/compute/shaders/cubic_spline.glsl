@@ -1,74 +1,46 @@
-#version 430
+#version 460
 
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) buffer InputData {
+layout(std430, binding = 0) buffer InputBuffer {
     float inputData[];
 };
 
-layout(std430, binding = 1) buffer OutputData {
+layout(std430, binding = 1) buffer OutputBuffer {
     float outputData[];
 };
 
-layout(std430, binding = 2) buffer CurvatureBuffer {
-    float curvatureConstraints[];
-};
+uniform int samples;  // Number of subdivisions between each point
+uniform int dataSize; // Number of input data points
 
-layout(std430, binding = 3) buffer SecondDerivativeBuffer {
-    float secondDerivatives[];
-};
-
-uniform int samples;
-uniform int dataSize;
-
-void compute_second_derivatives() {
-    float diagonalTerms[256];
-    float offDiagonalTerms[256];
-    
-    secondDerivatives[0] = 0.0;
-    diagonalTerms[0] = 1.0;
-    offDiagonalTerms[0] = 0.0;
-    
-    for (int i = 1; i < dataSize - 1; i++) {
-        diagonalTerms[i] = 4.0 - offDiagonalTerms[i - 1];
-        offDiagonalTerms[i] = 1.0 / diagonalTerms[i];
-        secondDerivatives[i] = (curvatureConstraints[i] - secondDerivatives[i - 1]) / diagonalTerms[i];
-    }
-    
-    secondDerivatives[dataSize - 1] = 0.0;
-    
-    for (int i = dataSize - 2; i >= 0; i--) {
-        secondDerivatives[i] -= offDiagonalTerms[i] * secondDerivatives[i + 1];
-    }
+float cubicInterpolation(float prevPoint, float startPoint, float endPoint, float nextPoint, float t) {
+    float a = (-prevPoint + 3.0 * startPoint - 3.0 * endPoint + nextPoint) * 0.5;
+    float b = (2.0 * prevPoint - 5.0 * startPoint + 4.0 * endPoint - nextPoint) * 0.5;
+    float c = (-prevPoint + endPoint) * 0.5;
+    return ((a * t + b) * t + c) * t + startPoint;
 }
 
 void main() {
-    int i = int(gl_GlobalInvocationID.x);
-    if (i >= (dataSize - 1) * samples + dataSize) return;
-
-    int segment = i / (samples + 1);
-    float t = float(i % (samples + 1)) / float(samples + 1);
+    uint globalIndex  = gl_GlobalInvocationID.x;
     
-    float y0 = inputData[max(0, segment - 1)];
-    float y1 = inputData[segment];
-    float y2 = inputData[min(dataSize - 1, segment + 1)];
-    float y3 = inputData[min(dataSize - 1, segment + 2)];
-
-    if (segment < dataSize - 1) {
-        curvatureConstraints[segment] = 3.0 * (y2 - y1) - 3.0 * (y1 - y0);
-    }
+    int totalSize = (dataSize - 1) * (samples + 1) + 1;
+    if (globalIndex  >= totalSize) return; // Avoid out-of-bounds writes
     
-    barrier();
-    compute_second_derivatives();
+    int basePointIndex  = int(globalIndex  / (samples + 1)); // Index of the base data point
+    int interpolationIndex = int(globalIndex  % (samples + 1)); // Position in interpolation range
 
-    float cubic = (secondDerivatives[segment + 1] - secondDerivatives[segment]) / 6.0;
-    float quadratic = secondDerivatives[segment] / 2.0;
-    float linear = (y2 - y1) - (secondDerivatives[segment + 1] + 2.0 * secondDerivatives[segment]) / 6.0;
-    float constant = y1;
+    if (interpolationIndex == 0) {
+        // Directly copy the original data points
+        outputData[globalIndex ] = inputData[basePointIndex ];
+    } else {
+        // Interpolation
+        float t = float(interpolationIndex) / float(samples + 1);
 
-    outputData[i] = constant + linear * t + quadratic * t * t + cubic * t * t * t;
-    
-    if (i == (dataSize - 1) * samples + dataSize - 1) {
-        outputData[i] = inputData[dataSize - 1];
+        float p0 = inputData[max(basePointIndex  - 1, 0)];
+        float p1 = inputData[basePointIndex ];
+        float p2 = inputData[min(basePointIndex  + 1, dataSize - 1)];
+        float p3 = inputData[min(basePointIndex  + 2, dataSize - 1)];
+
+        outputData[globalIndex ] = cubicInterpolation(p0, p1, p2, p3, t);
     }
 }
