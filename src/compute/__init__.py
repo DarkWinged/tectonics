@@ -1,5 +1,3 @@
-
-
 import os
 from .cublic_spline import cubic_spline
 from .write_to_tex import write_grid_to_texture

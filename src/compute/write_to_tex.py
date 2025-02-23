@@ -3,6 +3,7 @@ import OpenGL.GL as gl
 import numpy as np
 import os
 
+
 def write_grid_to_texture(
     interpolated_grid: np.ndarray, /, shader: str, output_filename="image.png"
 ):
