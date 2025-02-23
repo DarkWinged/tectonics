@@ -73,7 +73,9 @@ class ArrayGeneratorND:
         self.dims = dims
         self.low = low
         self.high = high
-        self.seed = seed or int(datetime.datetime.now().strftime("%Y%m%d%H%M%S")) %(2**32 - 2)
+        self.seed = seed or int(datetime.datetime.now().strftime("%Y%m%d%H%M%S")) % (
+            2**32 - 2
+        )
 
     def __call__(self) -> np.ndarray:
         """
