@@ -2,38 +2,7 @@ import noise
 import numpy as np
 import numpy.typing as npt
 
-
-def pack_points(coordinates: np.ndarray, values: np.ndarray) -> npt.NDArray[np.object_]:
-    """Pack coordinates and values into [coord, value] rows.
-
-    Args:
-        coordinates (np.ndarray): Coordinates of shape (N, D).
-        values (np.ndarray): Values of shape (N,).
-
-    Returns:
-        array[datapoint]: Object array of shape (N, 2), rows [coord, value].
-    """
-    n = coordinates.shape[0]
-    result = np.empty((n, 2), dtype=object)
-    result[:, 0] = [c for c in coordinates]  # each row is an ndarray (D,)
-    result[:, 1] = values
-    return result
-
-
-def split_points(points: npt.NDArray[np.object_]) -> tuple[np.ndarray, np.ndarray]:
-    """Split [coord, value] array into separate arrays.
-
-    Args:
-        points (npt.NDArray[np.object_]): Input array of shape (N, 2).
-
-    Returns:
-        tuple[np.ndarray, np.ndarray]:
-            coordinates: float array of shape (N, D).
-            values: float array of shape (N,).
-    """
-    coords = np.stack(points[:, 0], axis=0).astype(float)  # (N, D)
-    values = points[:, 1].astype(float)  # (N,)
-    return coords, values
+from .utils import pack_points, split_points
 
 
 class DataSeries:
