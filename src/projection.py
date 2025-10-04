@@ -3,7 +3,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .spheroid import Spheroid
-from .utils import compute_barycentric
+from .utils import vector_to_coordinate
 
 
 def scale_map_to_resolution(
@@ -11,7 +11,7 @@ def scale_map_to_resolution(
     bounding_box: tuple[float, float],
     resolution: tuple[int, int],
     padding: float = 0.5,
-) -> np.ndarray:
+) -> tuple[np.ndarray, tuple[float, float]]:
     """
     Scale and translate the 2D layout so that it fits within the UV resolution,
     with at least `padding` units from the border.
@@ -26,7 +26,9 @@ def scale_map_to_resolution(
         padding (float): Absolute margin in UV units/pixels to leave on all sides.
 
     Returns:
-        np.ndarray: Array (V, 2) of UV coordinates in pixel units, with margin.
+        tuple[np.ndarray, tuple[float, float]]:
+            - Scaled and translated vertices array shape (V, 2).
+            - The bounding box (layout_height, layout_width) after scaling.
     """
     layout_height, layout_width = bounding_box
     res_width, res_height = resolution
@@ -54,7 +56,7 @@ def scale_map_to_resolution(
     translate_v = padding - min_uv[1]
 
     uv_translated = uv_scaled + np.array([translate_u, translate_v], dtype=float)
-    return uv_translated
+    return uv_translated, (layout_height * scale, layout_width * scale)
 
 
 def point_in_polygon(point: tuple[float, float], polygon: np.ndarray) -> bool:
@@ -84,9 +86,10 @@ def point_in_polygon(point: tuple[float, float], polygon: np.ndarray) -> bool:
         ui, vi = polygon[i]
         uj, vj = polygon[j]
         # Check if the horizontal ray at v crosses edge between vertices i,j
-        intersects = (
-            (vi > v) != (vj > v)  # edge straddles the horizontal line at v
-            and (u < (uj - ui) * (v - vi) / (vj - vi + 1e-16) + ui)
+        intersects = (vi > v) != (
+            vj > v
+        ) and (  # edge straddles the horizontal line at v
+            u < (uj - ui) * (v - vi) / (vj - vi + 1e-16) + ui
         )
         if intersects:
             inside = not inside
@@ -95,109 +98,197 @@ def point_in_polygon(point: tuple[float, float], polygon: np.ndarray) -> bool:
     return inside
 
 
-def coords3d_from_vectors(vectors_obj: np.ndarray) -> np.ndarray:
-    v = np.stack(vectors_obj)
-    dirs = np.stack(v[:, 0]).astype(float)
-    mags = np.asarray(v[:, 1], dtype=float)
-    return dirs * mags[:, None]
+def inplane_basis(vertices_3d: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    centroid = vertices_3d.mean(axis=0)
+    centered_vertices = vertices_3d - centroid
+    _, _, right_singular_vectors = np.linalg.svd(centered_vertices, full_matrices=False)
+    basis_x = right_singular_vectors[0]
+    basis_y = right_singular_vectors[1]
+    return basis_x, basis_y, centroid
 
 
-def inplane_basis(points3: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    c = points3.mean(axis=0)
-    p0, p1, p2 = points3[0], points3[1], points3[2]
-    ex = p1 - p0
-    ex /= np.linalg.norm(ex)
-    n = np.cross(p2 - p0, p1 - p0)
-    n /= np.linalg.norm(n)
-    ey = np.cross(n, ex)
-    return ex, ey, c
+def project_face_to_2d(vertices_3d: np.ndarray) -> np.ndarray:
+    basis_x, basis_y, centroid = inplane_basis(vertices_3d)
+    normalized_vertices = vertices_3d - centroid
+    return np.column_stack(
+        (normalized_vertices @ basis_x, normalized_vertices @ basis_y)
+    )
 
 
-def face_planar_2d(points3: np.ndarray) -> np.ndarray:
-    ex, ey, c = inplane_basis(points3)
-    P = points3 - c
-    return np.column_stack((P @ ex, P @ ey))
+def normalize_face_radius(vertices_2d: np.ndarray, target_radius: float) -> np.ndarray:
+    centroid = vertices_2d.mean(axis=0)
+    centered_vertices = vertices_2d - centroid
+
+    radii = np.linalg.norm(centered_vertices, axis=1)
+    r = float(radii.max())
+    if r == 0.0:
+        return centered_vertices
+    return centered_vertices * (target_radius / r)
 
 
-def rotate_canonical(uv: np.ndarray, k: int) -> np.ndarray:
-    if k not in (5, 6):
-        return uv
-    target = np.pi / 6.0 if k == 6 else np.pi / 2.0
-    a0 = np.arctan2(uv[0, 1], uv[0, 0])
-    d = target - a0
-    c, s = np.cos(d), np.sin(d)
-    R = np.array([[c, -s], [s, c]])
-    return uv @ R.T
+def rotate_canonical(vertex: np.ndarray) -> np.ndarray:
+    target = 0.0 if vertex.shape[0] == 6 else np.pi / 2.0
+    arc = np.arctan2(vertex[0, 1], vertex[0, 0])
+    delta = target - arc
+    cos_delta, sin_delta = np.cos(delta), np.sin(delta)
+    rotation = np.array([[cos_delta, -sin_delta], [sin_delta, cos_delta]])
+    return vertex @ rotation.T
 
 
-def pack_rowcol_to_xy(row: np.ndarray, col: np.ndarray) -> np.ndarray:
-    """30° CCW hex packing: ((√3/2)·row, col - floor(row/2) + 0.5·row)."""
-    u = np.asarray(row, dtype=float)
-    v = np.asarray(col, dtype=float)
-    x = (np.sqrt(3.0) / 2.0) * u
-    y = v - np.floor(u / 2.0) + 0.5 * u
-    return np.column_stack((x, y))
+def translate_to_packed_position(rows: np.ndarray, columns: np.ndarray) -> np.ndarray:
+    radius = 1.0
+    x_in = np.asarray(rows, dtype=float)
+    y_in = np.asarray(columns, dtype=float)
+    x_out = 1.5 * radius * x_in
+    y_out = np.sqrt(3.0) * radius * (y_in - np.floor(x_in / 2.0) + (radius / 2) * x_in)
+    return np.column_stack((x_out, y_out))
 
 
-def grid_rows_cols(count: int) -> tuple[np.ndarray, np.ndarray]:
-    cols = int(np.ceil(np.sqrt(count)))
-    rows = int(np.ceil(count / cols))
-    r = np.repeat(np.arange(rows), cols)[:count]
-    c = np.tile(np.arange(cols), rows)[:count]
-    return r, c
+def optimize_grid_dimensions(total_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    side_length = int(np.ceil(np.sqrt(total_cells)))
+    while side_length**2 < total_cells:
+        side_length += 1
+    rows = np.arange(total_cells) % side_length
+    cols = np.arange(total_cells) // side_length
+    return rows, cols
 
 
-def append_face(
-    vertices_2d_list: list,
-    faces_list: list,
-    vertex_map: dict,
-    uv_coords: np.ndarray,
-    face_indices_3d: np.ndarray,
-) -> None:
-    start = len(vertices_2d_list)
-    vertices_2d_list.extend(uv_coords.tolist())
-    new_idx = np.arange(start, start + len(face_indices_3d), dtype=int)
-    faces_list.append(new_idx.tolist())
-    for ui, vi in zip(new_idx, face_indices_3d):
-        vertex_map[int(ui)] = int(vi)
+def map_face_to_2d(
+    face_3d_index: int,
+    face_3d: np.ndarray,
+    vertices_3d: np.ndarray,
+    faces_2d: list[np.ndarray],
+    vertices_2d: np.ndarray,
+    vertex_map: dict[int, int],
+    target_coordinates: np.ndarray,
+    padding: float = 0.1,
+) -> np.ndarray:
+    face_3d_vertex_indices = np.asarray(face_3d, dtype=int)
+    face_2d_vertices = normalize_face_radius(
+        project_face_to_2d(vertices_3d[face_3d_vertex_indices]),
+        target_radius=1.0 - padding,
+    )
+
+    vertices_2d = np.vstack((vertices_2d, face_2d_vertices))
+    face_2d_index_range: tuple[int, int] = (
+        len(vertices_2d) - len(face_3d_vertex_indices),
+        len(vertices_2d),
+    )
+    faces_2d.append(np.arange(*face_2d_index_range))
+
+    for vertex_2d_index, vertex_3d_index in zip(
+        range(*face_2d_index_range), face_3d_vertex_indices
+    ):
+        vertex_map[int(vertex_2d_index)] = int(vertex_3d_index)
+    vertices_2d[face_2d_index_range[0] : face_2d_index_range[1]] = rotate_canonical(
+        vertices_2d[face_2d_index_range[0] : face_2d_index_range[1]],
+    )
+    vertices_2d[face_2d_index_range[0] : face_2d_index_range[1]] += target_coordinates[
+        face_3d_index
+    ]
+    return vertices_2d
 
 
-def shift_positive_and_bbox(
-    uv_all: np.ndarray,
-) -> tuple[np.ndarray, tuple[float, float]]:
-    min_xy = uv_all.min(axis=0)
-    uv_all = uv_all - min_xy
-    max_xy = uv_all.max(axis=0)
-    return uv_all, (float(max_xy[1]), float(max_xy[0]))  # (height, width)
+def unwrap_spheroid(
+    spheroid: Spheroid, uv_padding: float = 0.1
+) -> tuple[np.ndarray, np.ndarray, dict[int, int], tuple[int, int]]:
+    faces_3d = spheroid.faces
+    face_count = len(faces_3d)
+    vertices_3d: npt.NDArray[np.object_] = np.array(
+        [vector_to_coordinate(vector) for vector in spheroid.vectors]
+    )
 
+    rows, columns = optimize_grid_dimensions(face_count)
+    target_coordinates = translate_to_packed_position(rows, columns)
 
-def build_faces_object_array(faces_list: list[list[int]]) -> np.ndarray:
-    return np.array([np.asarray(f, dtype=int) for f in faces_list], dtype=object)
-
-
-def unwrap_spheroid(spheroid: Spheroid):
-    faces_src = spheroid.faces  # ordered arrays of vertex indexes
-    N = len(faces_src)
-    coords3 = coords3d_from_vectors(spheroid.vectors)
-
-    r, c = grid_rows_cols(N)
-    centers = pack_rowcol_to_xy(r, c)
-
-    vertices_2d_acc: list[tuple[float, float]] = []
-    faces_uv_acc: list[list[int]] = []
+    vertices_2d: npt.NDArray = np.empty((0, 2), dtype=float)
+    faces_2d: list[np.ndarray] = []
     vertex_map: dict[int, int] = {}
 
-    for i, face_idx_list in enumerate(faces_src):
-        f = np.asarray(face_idx_list, dtype=int)
-        uv = face_planar_2d(coords3[f])
-        uv = rotate_canonical(uv, k=len(f))
-        uv = uv + centers[i][None, :]
-        append_face(vertices_2d_acc, faces_uv_acc, vertex_map, uv, f)
+    for face_3d_index, face_3d in enumerate(faces_3d):
+        vertices_2d = map_face_to_2d(
+            face_3d_index,
+            face_3d,
+            vertices_3d,
+            faces_2d,
+            vertices_2d,
+            vertex_map,
+            target_coordinates,
+            padding=uv_padding,
+        )
 
-    vertices_2d = np.asarray(vertices_2d_acc, dtype=float)
-    vertices_2d, bounding_box = shift_positive_and_bbox(vertices_2d)
-    faces = build_faces_object_array(faces_uv_acc)
-    return faces, vertices_2d, vertex_map, bounding_box
+    min_x = np.min(vertices_2d[:, 0])
+    min_y = np.min(vertices_2d[:, 1])
+    if min_x < 0 or min_y < 0:
+        vertices_2d[:, 0] -= min_x
+        vertices_2d[:, 1] -= min_y
+
+    # tuple (height, width)
+    bounding_box = (float(np.max(vertices_2d[:, 1])), float(np.max(vertices_2d[:, 0])))
+
+    return np.array(faces_2d, dtype=object), vertices_2d, vertex_map, bounding_box
+
+
+def scalar_cross_2d(vec_start: np.ndarray, vec_end: np.ndarray) -> float:
+    return vec_start[0] * vec_end[1] - vec_start[1] * vec_end[0]
+
+
+def calculate_mean_value_coordinates(
+    point_2d: np.ndarray, polygon_2d: np.ndarray
+) -> np.ndarray:
+    """
+    We calculate the weights of the polygon's vertices in relation to the given 2D point.
+
+    Args:
+        point_2d (np.ndarray): The 2D point as (2,) array.
+        polygon_2d (np.ndarray): The vertices as (n, 2) array.
+
+    Returns:
+        np.ndarray: The weights for each vertex of the polygon.
+    """
+    tolerance: float = 1e-12
+    vertex_count = polygon_2d.shape[0]
+    ray_vectors = polygon_2d - point_2d[None, :]  # (n,2)
+    ray_lengths = np.linalg.norm(ray_vectors, axis=1)  # (n,)
+    nearest_index = int(np.argmin(ray_lengths))
+    if ray_lengths[nearest_index] < tolerance:
+        weights = np.zeros(vertex_count, dtype=float)
+        weights[nearest_index] = 1.0
+        return weights
+
+    # on-edge check
+    for ray_index, ray in enumerate(ray_vectors):
+        ray_start_vector = ray
+        ray_end_vector = ray_vectors[(ray_index + 1) % vertex_count]
+        if (
+            abs(scalar_cross_2d(ray_start_vector, ray_end_vector)) < tolerance
+            and np.dot(ray_start_vector, ray_end_vector) <= 0.0
+        ):
+            interpolation_fraction = ray_lengths[ray_index] / (
+                ray_lengths[ray_index] + ray_lengths[(ray_index + 1) % vertex_count]
+            )
+            weights = np.zeros(vertex_count, dtype=float)
+            weights[ray_index] = 1.0 - interpolation_fraction
+            weights[(ray_index + 1) % vertex_count] = interpolation_fraction
+            return weights
+
+    angles = np.empty(vertex_count, dtype=float)
+    for ray_index, ray in enumerate(ray_vectors):
+        ray_start_vector = ray
+        ray_end_vector = ray_vectors[(ray_index + 1) % vertex_count]
+        angles[ray_index] = np.arctan2(
+            scalar_cross_2d(ray_start_vector, ray_end_vector),
+            np.dot(ray_start_vector, ray_end_vector),
+        )
+
+    half_tangents = np.tan(angles / 2.0)
+    weights = (np.roll(half_tangents, 1) + half_tangents) / ray_lengths
+    summed_weights = float(weights.sum())
+    if abs(summed_weights) < tolerance:
+        weights[:] = 0.0
+        weights[nearest_index] = 1.0
+        return weights
+    return weights / summed_weights
 
 
 class Projection:
@@ -233,7 +324,7 @@ class Projection:
 
     @classmethod
     def from_spheroid(
-        cls, spheroid: Spheroid, resolution: tuple[int, int]
+        cls, spheroid: Spheroid, resolution: tuple[int, int], **configs
     ) -> "Projection":
         """Create a Projection from a Spheroid by projecting its vertices to UV space.
 
@@ -244,12 +335,15 @@ class Projection:
         Returns:
             Projection: The resulting Projection object.
         """
-
         # unwrap the spheroid, truncated icosahedron of n >= 0 base icosahedron subdivisions
         # Unwraps faces to a non-overlapping non-contiguous 2D layout and maps vertices from (u,v) to (x,y,z) by index
-        faces, vertices_2d, vertex_map, bounding_box = unwrap_spheroid(spheroid)
+        faces, vertices_2d, vertex_map, bounding_box = unwrap_spheroid(
+            spheroid, configs.get("uv_padding", None)
+        )
         # scale and rotate the 2d UV coordinates to fit within the given resolution
-        vertices = scale_map_to_resolution(vertices_2d, bounding_box, resolution)
+        vertices, bounding_box = scale_map_to_resolution(
+            vertices_2d, bounding_box, resolution
+        )
 
         return cls(
             faces=faces,
@@ -287,58 +381,66 @@ class Projection:
         return np.array(coords, dtype=int), np.array(face_indices, dtype=int)
 
     def project_to_spheroid(
-        self, u: int, v: int, face_index: int, spheroid: Spheroid
+        self, u: int, v: int, face_index: int, spheroid: Spheroid, **configs
     ) -> tuple[float, float, float]:
-        """Project a 2D pixel position (u,v) from UV space onto the 3D surface of a spheroid.
+        weights_exponent = configs.get("weights_exponent", 1.0)
+        scaler = float(configs.get("scaler", 1.0))
+        plane_relaxation = float(configs.get("plane_relaxation", 0.0))
 
-        The projection is performed by:
-        1. Identifying the polygon (face) in UV space that (u,v) belongs to.
-        2. Selecting the three closest vertices of that face in UV space.
-        3. Mapping those vertices to their corresponding 3D positions on the target spheroid
-            via the stored vertex_map.
-        4. Interpolating the pixel's 3D position using barycentric coordinates
-            with respect to the triangle formed by those three vertices.
-
-        This provides an approximation of the pixel's 3D location on the spheroid surface.
-        Works for convex or concave n-gons (non-self-intersecting).
-
-        Args:
-            u (int): Pixel coordinate u in UV space.
-            v (int): Pixel coordinate v in UV space.
-            face_index (int): Index of the face in the projection that (u,v) belongs to.
-            spheroid (Spheroid): The target spheroid to project onto. Must share the same
-                face/vertex arrangement as the spheroid used to generate this Projection.
-
-        Returns:
-            tuple[float, float, float]: The projected 3D coordinate on the spheroid surface.
-        """
         face = self.faces[face_index]
-        polygon_2d = self.vertices[np.array(face)]  # (n, 2) polygon in UV space
-
-        # distances from pixel to each vertex in 2D
+        polygon_2d = self.vertices[np.array(face)]
         pixel_2d = np.array([u, v], dtype=float)
-        dists = np.linalg.norm(polygon_2d - pixel_2d, axis=1)
 
-        # indices of the three closest vertices within this face
-        face_indices = np.argsort(dists)[:3]
-        vertex_indices = np.array(face)[face_indices]
-        vertices_2d = polygon_2d[face_indices]
+        weights = calculate_mean_value_coordinates(pixel_2d, polygon_2d)
 
-        # get corresponding 3D vertices on the target spheroid
-        vertices_3d = np.array(
-            [
-                spheroid.vertices[self.vertex_map[vertex_index]]
-                for vertex_index in vertex_indices
-            ],
-            dtype=float,
-        )
+        if weights_exponent != 1.0:
+            weights = np.power(np.maximum(weights, 0.0), weights_exponent)
+            weights /= weights.sum()
 
-        # compute barycentric coordinates of (u,v) wrt the 2D triangle
-        bary = compute_barycentric(pixel_2d, vertices_2d)
+        face_indices = np.array(face, dtype=int)
+        vertex_data = [
+            spheroid.vectors[self.vertex_map[int(idx)]] for idx in face_indices
+        ]
+        vertex_directions = np.stack([vd[0] for vd in vertex_data]).astype(float)
+        vertex_magnitudes = np.asarray([vd[1] for vd in vertex_data], dtype=float)
 
-        # interpolate 3D position using barycentric weights
-        point_3d = np.sum(vertices_3d * bary[:, np.newaxis], axis=0)
-        return tuple(point_3d)
+        direction_blend = weights @ vertex_directions
+        direction_normal = np.linalg.norm(direction_blend)
+        if direction_normal > 0.0:
+            direction_blend /= direction_normal
+
+        cartesian_blend = (
+            (weights * vertex_magnitudes)[:, None] * vertex_directions
+        ).sum(axis=0)
+
+        radius_blend = float(np.dot(direction_blend, cartesian_blend))
+
+        if scaler != 1.0:
+            point_3d = direction_blend * (scaler * max(radius_blend, 0.0))
+        else:
+            point_3d = direction_blend * max(radius_blend, 0.0)
+
+        if plane_relaxation != 0.0:
+            vertices_3d_for_plane = np.vstack(
+                [
+                    vector_to_coordinate(spheroid.vectors[self.vertex_map[int(idx)]])
+                    for idx in face_indices
+                ]
+            ).astype(float)
+            basis_x, basis_y, centroid = inplane_basis(vertices_3d_for_plane)
+            normal_vector = np.cross(basis_x, basis_y)
+            normal_magnitude = np.linalg.norm(normal_vector)
+            if normal_magnitude > 0.0:
+                normal_vector /= normal_magnitude
+                offset_vector = point_3d - centroid
+                point_on_plane = (
+                    point_3d - np.dot(offset_vector, normal_vector) * normal_vector
+                )
+                point_3d = (
+                    1.0 - plane_relaxation
+                ) * point_3d + plane_relaxation * point_on_plane
+
+        return float(point_3d[0]), float(point_3d[1]), float(point_3d[2])
 
     def scale(self, resolution: tuple[float, float]) -> "Projection":
         """Copies the Projection scaled to a new resolution.
@@ -349,12 +451,14 @@ class Projection:
         Returns:
             Projection: A new Projection object scaled to the specified resolution.
         """
-        vertices = scale_map_to_resolution(self.vertices, resolution)
+        vertices, bounding_box = scale_map_to_resolution(
+            self.vertices, self.bounding_box, resolution
+        )
         return Projection(
-            vertices=vertices,
-            edges=self.edges,
             faces=self.faces,
+            vertices=vertices,
             vertex_map=self.vertex_map,
+            bounding_box=bounding_box,
         )
 
 
@@ -396,7 +500,9 @@ class UVMap:
         self.projection = projection if projection is not None else Projection()
 
     @classmethod
-    def from_spheroid(cls, resolution: tuple[int, int], spheroid: Spheroid) -> "UVMap":
+    def from_spheroid(
+        cls, resolution: tuple[int, int], spheroid: Spheroid, **configs
+    ) -> "UVMap":
         """Create a UVMap from a Spheroid by projecting and rasterizing it.
 
         Args:
@@ -405,7 +511,7 @@ class UVMap:
         Returns:
             UVMap: The resulting UVMap object.
         """
-        projection = Projection.from_spheroid(spheroid, resolution)
+        projection = Projection.from_spheroid(spheroid, resolution, **configs)
         # rasterize the spheroid surface to get (u,v) coordinates and face indices
         coords, face_indices = projection.rasterize(resolution)
         return cls(
@@ -416,6 +522,7 @@ class UVMap:
         self,
         noise_function: Callable[[tuple[int, int, int]], float],
         spheroid: Spheroid,
+        **configs,
     ) -> "UVMap":
         """Generate noise values for the UV map using a provided noise function.
 
@@ -429,7 +536,9 @@ class UVMap:
         noise_values = []
         for (u, v), face_index in zip(self.coords, self.face_indices):
             value = noise_function(
-                self.projection.project_to_spheroid(u, v, face_index, spheroid)
+                *self.projection.project_to_spheroid(
+                    u, v, face_index, spheroid, **configs
+                )
             )
             noise_values.append(value)
         self.values = np.array(noise_values, dtype=float)

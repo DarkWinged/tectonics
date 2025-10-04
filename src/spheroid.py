@@ -153,10 +153,12 @@ class Spheroid:
         s = int(subdivisions)
 
         # ----- Barycentric grid (template for one face) -----
-        I, J = np.meshgrid(np.arange(s + 1), np.arange(s + 1), indexing="ij")
-        mask = (I + J) <= s
-        ii = I[mask]  # (P,)
-        jj = J[mask]  # (P,)
+        rows_indices, columns_indices = np.meshgrid(
+            np.arange(s + 1), np.arange(s + 1), indexing="ij"
+        )
+        mask = (rows_indices + columns_indices) <= s
+        ii = rows_indices[mask]  # (P,)
+        jj = columns_indices[mask]  # (P,)
         kk = s - (ii + jj)  # (P,)
         P = ii.size
         bary = (np.stack([ii, jj, kk], axis=1) / float(s)).astype(float)  # (P, 3)

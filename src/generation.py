@@ -3,7 +3,6 @@ import numpy as np
 from numpy import typing as npt
 
 from .utils import (
-    coordinate_to_vector,
     normalize_vector,
     split_points,
     vector_to_coordinate,
