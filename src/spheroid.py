@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 import numpy.typing as npt
 
@@ -21,6 +22,14 @@ class Spheroid:
             self.subdivide(subdivisions)
         if dual:
             self.dual()
+
+    def clone(self) -> "Spheroid":
+        """Create a copy of the current Spheroid instance."""
+        cloned = Spheroid.__new__(Spheroid)
+        cloned.vectors = copy.deepcopy(self.vectors)
+        cloned.edges = copy.deepcopy(self.edges)
+        cloned.faces = copy.deepcopy(self.faces)
+        return cloned
 
     def icosahedron(
         self,
@@ -359,3 +368,11 @@ class Spheroid:
         self.faces = dual_faces
 
         return self
+
+    @property
+    def vertices(self) -> npt.ArrayLike:
+        """Get the vertex coordinates as an (N, 3) float array."""
+        vectors = np.stack(self.vectors)
+        directions = np.stack(vectors[:, 0]).astype(float)
+        magnitudes = vectors[:, 1].astype(float)
+        return directions * magnitudes[:, None]
