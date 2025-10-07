@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Callable
 import numpy as np
 import numpy.typing as npt
@@ -461,6 +463,17 @@ class Projection:
             bounding_box=bounding_box,
         )
 
+    def to_dict(self) -> dict:
+        faces_serializable = [
+            np.asarray(face, dtype=int).tolist() for face in self.faces
+        ]
+        return {
+            "faces": faces_serializable,
+            "vertices": np.asarray(self.vertices, dtype=float).tolist(),
+            "vertex_map": {str(int(k)): int(v) for k, v in self.vertex_map.items()},
+            "bounding_box": [float(self.bounding_box[0]), float(self.bounding_box[1])],
+        }
+
 
 class UVMap:
     """A UV map representing a texture map for a spheroid."""
@@ -558,4 +571,45 @@ class UVMap:
         coords, face_indices = projection.rasterize(resolution)
         return UVMap(
             resolution, coords=coords, face_indices=face_indices, projection=projection
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "resolution": (int(self.resolution[0]), int(self.resolution[1])),
+            "coords": np.asarray(self.coords, dtype=int).tolist(),
+            "face_indices": np.asarray(self.face_indices, dtype=int).tolist(),
+            "values": np.asarray(self.values, dtype=float).tolist(),
+            "projection": self.projection.to_dict(),
+        }
+
+    def save(self, filepath: str) -> None:
+        save_path = Path(filepath)
+        if save_path.suffix != ".json":
+            raise ValueError("UVMap can only be saved to a .json file")
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, filepath: str) -> "UVMap":
+        load_path = Path(filepath)
+        if load_path.suffix != ".json":
+            raise ValueError("UVMap can only be loaded from a .json file")
+        with open(load_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        proj = data.get("projection", {})
+        faces_list = [np.asarray(face, dtype=int) for face in proj.get("faces", [])]
+        projection = Projection(
+            faces=np.array(faces_list, dtype=object),
+            vertices=np.asarray(proj.get("vertices", []), dtype=float),
+            vertex_map={int(k): int(v) for k, v in proj.get("vertex_map", {}).items()},
+            bounding_box=tuple(map(float, proj.get("bounding_box", (1, 1)))),
+        )
+
+        return cls(
+            resolution=tuple(map(int, data.get("resolution", (1, 1)))),
+            coords=np.asarray(data.get("coords", []), dtype=int),
+            face_indices=np.asarray(data.get("face_indices", []), dtype=int),
+            values=np.asarray(data.get("values", []), dtype=float),
+            projection=projection,
         )

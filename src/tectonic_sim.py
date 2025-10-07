@@ -275,7 +275,6 @@ class TectonicSimulation:
         position_weight = config.get("position_weight", 1.5)
         velocity_weight = config.get("velocity_weight", 0.2)
         density_weight = config.get("density_weight", 1.0)
-
         for node_index, node in enumerate(self.nodes):
             node_density = float(node.density) * density_weight
             node_point = np.asarray(node.position, dtype=float)
@@ -288,23 +287,25 @@ class TectonicSimulation:
             )
 
             terms = []
-            for ni in neighbor_indices:
-                nb = self.nodes[ni]
-                nb_density = float(nb.density) * density_weight
-                nb_point = np.asarray(nb.position, dtype=float)
-                nb_vel3 = tangent_vector_from_lonlat_rates(
-                    nb_point, np.asarray(nb.velocity, dtype=float)
+            for neighbor_index in neighbor_indices:
+                neighbor_node = self.nodes[neighbor_index]
+                neighbor_density = float(neighbor_node.density) * density_weight
+                neighbor_position = np.asarray(neighbor_node.position, dtype=float)
+                neighbor_velocity = tangent_vector_from_lonlat_rates(
+                    neighbor_position, np.asarray(neighbor_node.velocity, dtype=float)
                 )
-                nb_vel3_at_node = parallel_transport_tangent_vector(
-                    nb_point, node_point, nb_vel3
+                neighbor_velocity_at_node = parallel_transport_tangent_vector(
+                    neighbor_position, node_point, neighbor_velocity
                 )
 
-                position_term = position_weight * geodesic_angle(node_point, nb_point)
+                position_term = position_weight * geodesic_angle(
+                    node_point, neighbor_position
+                )
                 velocity_term = velocity_weight * np.linalg.norm(
-                    node_vel3 - nb_vel3_at_node
+                    node_vel3 - neighbor_velocity_at_node
                 )
                 friction_value = (base_friction + position_term + velocity_term) / (
-                    (node_density + nb_density) / 2.0
+                    (node_density + neighbor_density) / 2.0
                 )
                 terms.append(friction_value)
 
@@ -315,7 +316,10 @@ class TectonicSimulation:
         friction_dampening = config.get("friction_dampening", 1.0)
 
         for node_index, node in enumerate(self.nodes):
-            node_point = np.asarray(node.position, dtype=float)
+            node_height = self.regions[node.region].height
+            if node_height == 0.0:
+                node_height = 1e-6
+            node_point = np.asarray(node.position, dtype=float) * node_height
             node_vel3 = tangent_vector_from_lonlat_rates(
                 node_point, np.asarray(node.velocity, dtype=float)
             )
@@ -325,7 +329,12 @@ class TectonicSimulation:
 
             for neighbor_index in self.neighbors[node_index]:
                 neighbor = self.nodes[neighbor_index]
-                neighbor_point = np.asarray(neighbor.position, dtype=float)
+                neighbor_height = self.regions[neighbor.region].height
+                if neighbor_height == 0.0:
+                    neighbor_height = 1e-6
+                neighbor_point = (
+                    np.asarray(neighbor.position, dtype=float) * neighbor_height
+                )
                 neighbor_vel3 = tangent_vector_from_lonlat_rates(
                     neighbor_point, np.asarray(neighbor.velocity, dtype=float)
                 )
@@ -375,36 +384,40 @@ class TectonicSimulation:
             "stress_propagation_radius_per_threshold", 1
         )
         stress_distribution_factor = config.get("stress_distribution_factor", 0.5)
+
         stable = True
         for node_index, node in enumerate(self.nodes):
-            # check how many thresholds are exceeded
-            node_stress = node.stress  # will never be None
-            current_threshold = 0
-            for threshold in stress_thresholds:
-                if node_stress >= threshold:
-                    current_threshold += 1
+            node_stress = float(node.stress)
+            stress_magnitude = abs(node_stress)
+            current_threshold = int(np.sum(stress_magnitude >= stress_thresholds))
             if current_threshold == 0:
                 continue
+
             stable = False
-            # propagate stress to neighbors within radius
             propagation_radius = (
                 current_threshold * stress_propagation_radius_per_threshold
             )
-            neighbors_indices = self._get_neighbors_within_radius(
+            neighbor_indices = self._get_neighbors_within_radius(
                 node_index, propagation_radius
             )
-            # stress distribution is reduced by graph distance and scaled by distribution factor
+            if not neighbor_indices:
+                continue
 
-            stress_contribution = node_stress * stress_distribution_factor
-            node.stress -= stress_contribution
-            stress_per_neighbor = stress_contribution / len(neighbors_indices)
-            for neighbor_index in neighbors_indices:
+            # signed contribution; reduces |node.stress|
+            signed_contribution = np.sign(node_stress) * (
+                stress_magnitude * stress_distribution_factor
+            )
+            node.stress -= signed_contribution
+
+            per_neighbor_base = signed_contribution / len(neighbor_indices)
+            for neighbor_index in neighbor_indices:
                 neighbor = self.nodes[neighbor_index]
                 distance = self._node_traversal_distance(node_index, neighbor_index)
                 if np.isinf(distance):
                     raise RuntimeError("Graph traversal failed")
                 if distance > 0:
-                    neighbor.stress += stress_per_neighbor / distance
+                    neighbor.stress += per_neighbor_base / distance
+
         return stable
 
     def run(self, cycles: int, **config):
@@ -422,22 +435,32 @@ class TectonicSimulation:
                 break
 
     def apply_to_spheroid(
-        self, spheroid: Spheroid, stress_scalar: float = 1.0
+        self,
+        spheroid: Spheroid,
+        stress_scalar: float = 1.0,
+        min_magnitude: float = 1e-6,
     ) -> Spheroid:
-        faces_stress = np.asarray(
-            [node.stress + self.regions[node.region].height for node in self.nodes],
-            dtype=float,
+        face_stress = np.asarray([node.stress for node in self.nodes], dtype=float)
+        face_height = np.asarray(
+            [self.regions[node.region].height for node in self.nodes], dtype=float
         )
-
+        # faces -> vertices map
         vertex_to_faces: dict[int, list[int]] = {}
         for face_index, face in enumerate(spheroid.faces):
             for vertex_index in map(int, face):
                 vertex_to_faces.setdefault(vertex_index, []).append(face_index)
 
         for vertex_index, face_indices in vertex_to_faces.items():
-            average_stress = float(
-                np.mean(faces_stress[np.asarray(face_indices, dtype=int)])
+            mean_stress = float(
+                np.mean(face_stress[np.asarray(face_indices, dtype=int)])
             )
-            spheroid.vectors[vertex_index][1] += np.exp(stress_scalar * average_stress)
+            scale = float(np.exp(stress_scalar * mean_stress))
+            new_mag = float(spheroid.vectors[vertex_index][1]) * scale
+            mean_height = float(
+                np.mean(face_height[np.asarray(face_indices, dtype=int)])
+            )
+            spheroid.vectors[vertex_index][1] = (
+                max(new_mag, min_magnitude) + mean_height
+            )
 
         return spheroid
