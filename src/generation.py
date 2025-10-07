@@ -1,90 +1,164 @@
-import datetime
-from random import randrange
-from typing import List, Union, Iterator
-
+from typing import Literal
 import numpy as np
+from numpy import typing as npt
+
+from .utils import (
+    normalize_vector,
+    split_points,
+    vector_to_coordinate,
+)
 
 
-def n_d(*dims: int, low: int = 0, high: int = 10) -> Union[int, List]:
-    if not dims:
-        return randrange(low, high, 1)
-    return [n_d(*dims[1:], low=low, high=high) for _ in range(dims[0])]
+# ---------- types ----------
+
+# coordinate = npt.NDArray[np.float32, ...]
+# datapoint = npt.NDArray[coordinate, np.float32]
+# vector = npt.NDArray[npt.NDArray[np.float32, ...], np.float32]
+# edge = npt.NDArray[np.int32, np.int32]
+# face = npt.NDArray[np.int32, ...]
 
 
-def n_d_gen(
-    *dims: int, low: int = 0, high: int = 10
-) -> Union[Iterator[int], List[Iterator[int]]]:
-    """
-    Generate an n-dimensional array of random integers.
+def sample_at(
+    points: npt.NDArray[np.object_],
+    query_position: np.ndarray,
+    radius: float,
+    mode: Literal["coordinate", "vector"],
+    origin_point: np.ndarray | None = None,
+) -> float:
+    """Return value of nearest datapoint within radius.
 
     Args:
-        *dims(int): A list of integers representing the dimensions of the array.
-        low(int): The lower bound of the random integers.
-        high(int): The upper bound of the random integers.
+        points (npt.NDArray[np.object_]): Array of datapoints [[coord], value].
+        query_position (np.ndarray): Query position. Interpreted as a coordinate
+            if mode is "coordinate" or a [direction, magnitude] vector if mode
+            is "vector".
+        radius (float): Maximum search radius.
+        mode (Literal["coordinate", "vector"]): How to interpret query_position.
+        origin_point (np.ndarray | None): Origin used when interpreting
+            query_position as a vector. Defaults to zeros.
 
     Returns:
-        Union[Iterator[int], List[Iterator[int]]]: An iterator of random integers.
+        float: Value of nearest datapoint within radius, or NaN if none.
     """
-    if not dims:
-        yield np.random.randint(low, high=high)
-    else:
-        for _ in range(dims[0]):
-            yield from n_d_gen(*dims[1:], low=low, high=high)
+    coordinates, values = split_points(points)
 
-
-class RandomState:
-    """
-    Set the random state to a specific seed, then restore to the previous state on exit.
-    Args:
-        seed(Union[int, float, str]): The random seed.
-    """
-
-    def __init__(self, seed: Union[int, float, str]):
-        self.seed = seed
-
-    def __enter__(self):
-        self.state = np.random.get_state()
-        np.random.seed(self.seed)
-        return self
-
-    def __exit__(self, *args):
-        np.random.set_state(self.state)
-        return False
-
-
-class ArrayGeneratorND:
-    """
-    Create generator for n-dimensional arrays of random integers. Once initialized, the generator will always produce the same array.
-
-    Args:
-        *dims(int): A list of integers representing the dimensions of the array.
-        low(int): The lower bound of the random integers.
-        high(int): The upper bound of the random integers
-        seed(Union[int, float, str]): Optional, sets the seed to a specific value.
-    """
-
-    def __init__(
-        self,
-        *dims: int,
-        low: int = 0,
-        high: int = 10,
-        seed: Union[int, float, str] = None,
-    ):
-        self.dims = dims
-        self.low = low
-        self.high = high
-        self.seed = seed or int(datetime.datetime.now().strftime("%Y%m%d%H%M%S")) % (
-            2**32 - 2
+    if mode == "vector":
+        origin_array = (
+            np.zeros_like(query_position, dtype=np.float32)
+            if origin_point is None
+            else np.asarray(origin_point, dtype=np.float32)
         )
+        query_position = vector_to_coordinate(query_position, origin_point=origin_array)
 
-    def __call__(self) -> np.ndarray:
-        """
-        Generate an n-dimensional array of random integers. Always generates the same array without affecting global random state.
+    query_position = np.asarray(query_position, dtype=float)
+    distances = np.linalg.norm(coordinates - query_position, axis=1)
 
-        Returns:
-            np.ndarray: An n-dimensional array of random integers
-        """
-        with RandomState(self.seed):
-            return np.array(
-                list(n_d_gen(*self.dims, low=self.low, high=self.high))
-            ).reshape(self.dims)
+    nearest_index = int(np.argmin(distances))
+    if distances[nearest_index] > radius:
+        return float("nan")
+
+    return float(values[nearest_index])
+
+
+def march_ray_3d(
+    points: npt.NDArray[np.object_],
+    ray_vector: npt.NDArray[np.object_],
+    radius: float,
+    step_size: float,
+    max_distance: float,
+    default_value: float = np.nan,
+    origin_point: np.ndarray | None = None,
+) -> float:
+    """March a ray through space and return the value of the first datapoint hit.
+
+    Args:
+        points (npt.NDArray[np.object_]): Array of datapoints [[coord], value].
+        ray_vector (npt.NDArray[np.object_]): Ray as [direction, magnitude].
+        radius (float): Hit radius around datapoints.
+        step_size (float): Distance between consecutive march steps.
+        max_distance (float): Maximum march distance along the ray.
+        default_value (float, optional): Value returned if no hit is found.
+            Defaults to NaN.
+        origin_point (np.ndarray | None, optional): Ray origin. Defaults to [0,0,0].
+
+    Returns:
+        float: Value of the first datapoint hit, or default_value if no hit occurs.
+    """
+    direction, _ = normalize_vector(ray_vector)
+    direction = np.asarray(direction, dtype=float)
+    origin = (
+        np.zeros_like(direction)
+        if origin_point is None
+        else np.asarray(origin_point, dtype=float)
+    )
+
+    step_positions = np.arange(0.0, max_distance + 1e-12, step_size, dtype=float)
+    for t in step_positions:
+        pos = origin + t * direction
+        val = sample_at(points, pos, radius=radius, mode="coordinate")
+        if np.isfinite(val):
+            return val
+
+    return float(default_value)
+
+
+def apply_dataseries_to_polygon(
+    dataseries: npt.NDArray[np.object_],
+    polygon: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ray_radius: float = 0.5,
+    ray_step: float = 0.25,
+    default: float = 0.0,
+    origin: tuple[float, float, float] | None = None,
+    max_march: float | None = None,
+) -> tuple[npt.NDArray[np.object_], np.ndarray, np.ndarray]:
+    """Assign a value to each polygon vertex via ray marching over a data series.
+
+    Each input vertex is a vector [direction, magnitude]. For each vertex, a ray
+    starts at `origin` and marches along its direction. The first
+    datapoint within `ray_radius` is sampled and its value is assigned; otherwise
+    `default` is used. The output vertex rows are [direction, magnitude, value].
+
+    Args:
+        dataseries (npt.NDArray[np.object_]): Data points packed as [[coordinate], value].
+        polygon (tuple[np.ndarray, np.ndarray, np.ndarray]): (vectors, edges, faces),
+            where vectors are [[direction], magnitude].
+        ray_radius (float): Hit radius around data points.
+        ray_step (float): March step length.
+        max_march (float | None): Max march distance. If None, computed as
+            max(||coordinate||) + ray_step from `data_points`.
+        default (float): Value used when no hit occurs.
+        origin (tuple[float, float, float] | None): Ray origin coordinate.
+    Returns:
+        tuple[npt.NDArray[np.object_], np.ndarray, np.ndarray]:
+            vectors_out, edges_out, faces_out with vectors_out rows
+            [direction, magnitude, value].
+    """
+    vertex_vectors, edge_indices, face_indices = polygon
+    vertex_vectors = np.stack(vertex_vectors)  # (V, 2) object array
+
+    if max_march is None:
+        coordinates_dp, _ = split_points(dataseries)
+        max_march = float(np.max(np.linalg.norm(coordinates_dp, axis=1) + ray_step))
+
+    vectors_out = np.apply_along_axis(
+        lambda vertex_vector: np.array(
+            [
+                vertex_vector[0],
+                vertex_vector[1],
+                march_ray_3d(
+                    dataseries,
+                    vertex_vector,
+                    radius=ray_radius,
+                    step_size=ray_step,
+                    max_distance=max_march,
+                    default_value=default,
+                    origin_point=origin,
+                ),
+            ],
+            dtype=np.object_,
+        ),
+        axis=1,
+        arr=vertex_vectors,
+    )
+
+    return vectors_out, edge_indices, face_indices

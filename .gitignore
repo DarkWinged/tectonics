@@ -169,3 +169,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Common files
+*.diff
+*.log
+*.bak.*
+*.tmp.*
+*.json
